@@ -5,7 +5,7 @@ const { XMLParser } = require('fast-xml-parser');
 const cheerio = require('cheerio');
 const { Document, Packer, Paragraph, TextRun, ExternalHyperlink, HeadingLevel } = require('docx');
 
-const PORT = +process.env.PORT || 8080;
+const PORT = +process.env.PORT || 2525;
 const SOURCES_FILE = process.env.SOURCES_FILE || '/data/sources.txt';
 const TRUST_PROXY = process.env.TRUST_PROXY === '1';
 const RATE_POINTS = +process.env.RATE_POINTS_PER_MIN || 600;

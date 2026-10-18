@@ -6,6 +6,6 @@ RUN npm install --omit=dev --no-audit --no-fund && npm cache clean --force
 COPY server.js ./
 COPY public ./public
 USER node
-EXPOSE 8080
-HEALTHCHECK --interval=30s CMD wget -qO- http://127.0.0.1:8080/healthz || exit 1
+EXPOSE 2525
+HEALTHCHECK --interval=30s CMD wget -qO- http://127.0.0.1:2525/healthz || exit 1
 CMD ["node","server.js"]
