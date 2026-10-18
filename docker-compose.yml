@@ -1,0 +1,15 @@
+services:
+  papertrail:
+    build: .
+    ports: ["8080:8080"]          # put a TLS reverse proxy (Caddy/nginx/Traefik) in front for public hosting
+    environment:
+      - TRUST_PROXY=0             # set to 1 only when behind your reverse proxy (enables X-Forwarded-For rate limiting)
+      - RATE_POINTS_PER_MIN=600   # per-IP budget; a 40-source refresh costs 40
+    volumes: ["./data:/data:ro"]  # optional default sources.txt
+    read_only: true
+    tmpfs: ["/tmp"]
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    mem_limit: 512m
+    pids_limit: 200
+    restart: unless-stopped

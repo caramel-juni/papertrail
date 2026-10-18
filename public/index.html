@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>papertrail</title><link rel="stylesheet" href="/style.css"><script src="/app.js" defer></script></head>
+<body>
+<div class="desktop">
+<div class="window" id="app">
+  <div class="titlebar"><span class="ticon">📰</span><span class="ttext">papertrail</span>
+    <span class="tctl" aria-hidden="true"><i>_</i><i>▢</i><i class="x">✕</i></span></div>
+  <div class="toolbar">
+    <input id="q" type="search" placeholder="Search all fetched articles…" aria-label="Search articles">
+    <label>Source <select id="srcSel"><option value="">All sources</option></select></label>
+    <label>Show last <select id="win">
+      <option value="6">6 hours</option><option value="24">24 hours</option><option value="72">3 days</option>
+      <option value="168">7 days</option><option value="336">14 days</option><option value="720">30 days</option></select></label>
+    <label>Sort <select id="sort"><option value="new">Newest</option><option value="trend">Trending</option></select></label>
+    <button id="refresh">Refresh</button><button id="srcBtn">Sources…</button>
+  </div>
+  <nav id="tabs"><button data-view="feed">Feed</button><button data-view="saved">Saved</button><button data-view="later">Read later</button><button data-view="cats">Categories</button><button data-view="report">News report</button></nav>
+  <div class="panel"><div id="tags"></div><main id="list"></main></div>
+  <div class="statusbar"><span id="status" role="status"></span></div>
+</div>
+<div class="taskbar"><button id="start"><i>⊞</i> start</button><span class="task">📰 papertrail</span><span id="clock"></span></div>
+</div>
+<dialog id="dlg">
+  <div class="titlebar"><span class="ticon">📝</span><span class="ttext">Sources</span><button id="srcX" class="tclose" aria-label="Close">✕</button></div>
+  <div class="dbody">
+    <p>One per line. Optional tags after a pipe: <code>https://example.com/feed | politics, world</code>. Lines starting with # are ignored. Sites without a feed are scraped.</p>
+    <textarea id="srcText" rows="12" spellcheck="false" aria-label="Source URLs"></textarea>
+    <p><label>Load from file <input type="file" id="srcFile" accept=".txt,text/plain"></label></p>
+    <div class="row"><button id="srcSave">Save &amp; refresh</button><button id="srcDefaults">Load server defaults</button><button id="srcClose">Close</button></div>
+    <hr><div class="row"><button id="exportBtn">Export backup</button><label class="btn">Import backup <input type="file" id="importFile" accept=".json,application/json"></label></div>
+    <p class="note">Sources, saved stories, categories and reports live in this browser only. Use backup to move them between devices.</p>
+  </div>
+</dialog>
+</body></html>
