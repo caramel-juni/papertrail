@@ -1,6 +1,6 @@
 'use strict';
 const http = require('http'), https = require('https'), dns = require('dns'), net = require('net');
-const fs = require('fs'), path = require('path'), crypto = require('crypto');
+const zlib = require('zlib'), fs = require('fs'), path = require('path'), crypto = require('crypto');
 const { XMLParser } = require('fast-xml-parser');
 const cheerio = require('cheerio');
 const { Document, Packer, Paragraph, TextRun, ExternalHyperlink, HeadingLevel } = require('docx');
@@ -10,7 +10,7 @@ const SOURCES_FILE = process.env.SOURCES_FILE || '/data/sources.txt';
 const TRUST_PROXY = process.env.TRUST_PROXY === '1';
 const RATE_POINTS = +process.env.RATE_POINTS_PER_MIN || 600;
 const MAX_PAGE = 3 * 1024 * 1024, MAX_IMG = 2 * 1024 * 1024;
-const UA = 'Mozilla/5.0 (compatible; Newsdesk/1.0; +feed-reader)';
+const UA = 'Mozilla/5.0 (compatible; Papertrail/1.0; +feed-reader)';
 
 /* ---------- detailed, classified errors ---------- */
 class SourceError extends Error {
@@ -26,7 +26,12 @@ const HTTP_HINTS = {
 function classify(e) {
   if (e instanceof SourceError) return e;
   const c = e.code || '', m = String(e.message || '');
-  if (c === 'EBLOCKED') return new SourceError('Address resolves to a private or internal network', 'blocked', 'Only public internet sites can be fetched.');
+  if (c === 'EBLOCKED') {
+    const zero = /(^|, )(0\.0\.0\.0|::)(,|$)/.test(e.ips || '');
+    return new SourceError(`${e.host || 'Host'} resolved only to private/internal addresses (${e.ips || 'unknown'})`, 'blocked',
+      (zero ? 'Your DNS server is answering with a blocking address (Pi-hole/AdGuard style). ' : 'Your DNS server returned a private address (local DNS override, VPN or fake-IP DNS). ') +
+      'Allow-list the domain there, or give the container a public resolver with dns: [1.1.1.1, 9.9.9.9] in the compose/YAML.');
+  }
   if (c === 'ENOTFOUND' || c === 'EAI_AGAIN') return new SourceError('DNS lookup failed: host not found', 'dns', 'Check the domain spelling. If every source fails, the server may have no DNS or internet access.');
   if (c === 'ECONNREFUSED') return new SourceError('Connection refused by the site', 'connect', 'The site is down or not accepting web connections on this address.');
   if (c === 'ECONNRESET' || c === 'EPIPE') return new SourceError('Connection was reset by the site', 'connect', 'Often caused by bot protection. Try the site’s feed URL.');
@@ -51,12 +56,13 @@ function isPrivate(ip) {
 function safeLookup(host, opts, cb) {
   dns.lookup(host, { all: true }, (err, addrs) => {
     if (err) return cb(err);
-    if (!addrs.length || addrs.some(a => isPrivate(a.address))) return cb(Object.assign(new Error('blocked'), { code: 'EBLOCKED' }));
-    if (opts && opts.all) return cb(null, addrs);
-    cb(null, addrs[0].address, addrs[0].family);
+    const pub = addrs.filter(a => !isPrivate(a.address)); // the socket only ever connects to these validated addresses
+    if (!pub.length) return cb(Object.assign(new Error('blocked'), { code: 'EBLOCKED', host, ips: addrs.map(a => a.address).slice(0, 4).join(', ') }));
+    if (opts && opts.all) return cb(null, pub);
+    cb(null, pub[0].address, pub[0].family);
   });
 }
-function get(urlStr, { max = MAX_PAGE, accept = '*/*', until = '' } = {}, hops = 0, chain = []) {
+function rawGet(urlStr, { max = MAX_PAGE, accept = '*/*', until = '' } = {}, hops = 0, chain = []) {
   return new Promise((resolve, reject) => {
     let u;
     try { u = new URL(urlStr); } catch { return reject(new SourceError('Invalid URL', 'validate', 'Check the address, including http:// or https://.')); }
@@ -78,14 +84,23 @@ function get(urlStr, { max = MAX_PAGE, accept = '*/*', until = '' } = {}, hops =
         res.resume(); clearTimeout(timer); done = true;
         if (hops >= 4) return reject(new SourceError('Too many redirects (' + chain.concat(u.href).join(' → ') + ')', 'http', 'The site redirects in a loop.'));
         let next; try { next = new URL(res.headers.location, u).href; } catch { return reject(new SourceError('Redirect to an invalid address', 'http')); }
-        return resolve(get(next, { max, accept, until }, hops + 1, chain.concat(u.href))); // every hop is re-validated
+        return resolve(rawGet(next, { max, accept, until }, hops + 1, chain.concat(u.href))); // every hop is re-validated
       }
       if (sc >= 400) {
         res.resume();
         return fail(new SourceError(`HTTP ${sc} ${res.statusMessage || ''}`.trim(), 'http', HTTP_HINTS[sc] || (sc >= 500 ? 'The site’s server reported an error. Try again later.' : ''), sc));
       }
       const chunks = []; let n = 0, acc = '';
-      const end = () => finish({ status: sc, headers: res.headers, body: Buffer.concat(chunks), url: u.href, chain: chain.concat(u.href) });
+      const end = () => {
+        let body = Buffer.concat(chunks);
+        const enc = String(res.headers['content-encoding'] || '').toLowerCase();
+        try {
+          if (enc === 'gzip' || enc === 'x-gzip') body = zlib.gunzipSync(body, { maxOutputLength: max });
+          else if (enc === 'deflate') body = zlib.inflateSync(body, { maxOutputLength: max });
+          else if (enc === 'br') body = zlib.brotliDecompressSync(body, { maxOutputLength: max });
+        } catch { return fail(new SourceError('Could not decompress the response', 'content', 'The site sent a compressed response that could not be read.')); }
+        finish({ status: sc, headers: res.headers, body, url: u.href, chain: chain.concat(u.href) });
+      };
       res.on('data', c => {
         if (done) return;
         n += c.length;
@@ -102,8 +117,19 @@ function get(urlStr, { max = MAX_PAGE, accept = '*/*', until = '' } = {}, hops =
     req.end();
   });
 }
+// Global cap on simultaneous outbound fetches (one slot per logical fetch, redirects included).
+const MAX_OUT = +process.env.MAX_OUTBOUND || 24, MAX_QUEUE = process.env.MAX_QUEUE !== undefined ? +process.env.MAX_QUEUE : 200;
+let active = 0; const waiting = [];
+const acquire = () => new Promise((res, rej) => {
+  if (active < MAX_OUT) { active++; return res(); }
+  if (waiting.length >= MAX_QUEUE) return rej(new SourceError('Server is busy', 'busy', 'Too many fetches are in progress. Try again in a moment.'));
+  waiting.push(res);
+});
+const release = () => { const n = waiting.shift(); if (n) n(); else active--; };
+async function get(url, opts) { await acquire(); try { return await rawGet(url, opts); } finally { release(); } }
+
 function decode(r) {
-  const m = /charset=([\w-]+)/i.exec(r.headers['content-type'] || '');
+  const m = /charset=([\w-]+)/i.exec(r.headers['content-type'] || '') || /^\s*<\?xml[^>]*encoding=["']([\w-]+)/i.exec(r.body.subarray(0, 200).toString('latin1'));
   try { return new TextDecoder(m ? m[1] : 'utf-8').decode(r.body); } catch { return r.body.toString('utf8'); }
 }
 
@@ -161,7 +187,7 @@ function parseAny(text, trail) {
       if (!p) trail.push('JSON received but it is not a JSON Feed (no "items" array)');
       return p;
     }
-    if (/<(rss|feed|rdf:RDF)[\s>]/i.test(t.slice(0, 2500))) {
+    if (/<(rss|feed|rdf:RDF)[\s>]/i.test(t.slice(0, 8000))) {
       const p = parseXml(t);
       if (!p) trail.push('XML looks like a feed but has no recognised RSS/Atom structure');
       return p;
@@ -211,7 +237,7 @@ async function loadSource(s) {
     const r = await get(s.url, { accept: 'application/rss+xml, application/atom+xml, application/json, text/xml, text/html;q=0.8, */*;q=0.5' });
     const ctype = String(r.headers['content-type'] || 'unknown').split(';')[0];
     trail.push(`GET ${s.url} → ${r.status} ${ctype}, ${Math.max(1, Math.round(r.body.length / 1024))} KB` + (r.chain.length > 1 ? `, redirected ${r.chain.length - 1}× to ${r.url}` : ''));
-    if (!/html|xml|json|text/i.test(ctype)) throw new SourceError(`Not a web page or feed (${ctype})`, 'content', 'This URL points at a file, not a site or feed.');
+    if (/^(image|video|audio|font)\/|pdf|zip|x-tar|x-7z|msword|officedocument|x-shockwave/i.test(ctype)) throw new SourceError(`Not a web page or feed (${ctype})`, 'content', 'This URL points at a file, not a site or feed.');
     const body = decode(r);
     let p = parseAny(body, trail), base = r.url, via = 'feed';
     if (p) trail.push(`Recognised as ${p.kind} with ${p.raw.length} entries`);
@@ -313,6 +339,25 @@ const STATIC = {};
 for (const [route, file, type] of [['/', 'index.html', 'text/html; charset=utf-8'], ['/app.js', 'app.js', 'text/javascript; charset=utf-8'], ['/style.css', 'style.css', 'text/css; charset=utf-8']])
   STATIC[route] = { type, body: fs.readFileSync(path.join(__dirname, 'public', file)) };
 
+/* ---------- optional access control (set ACCESS_PASSWORD to enable) ---------- */
+const ACCESS_USER = process.env.ACCESS_USER || 'reader', ACCESS_PASSWORD = process.env.ACCESS_PASSWORD || '';
+const sha = x => crypto.createHash('sha256').update(String(x)).digest();
+const wantU = sha(ACCESS_USER), wantP = sha(ACCESS_PASSWORD), authFails = new Map();
+function authorised(req, ip, res) {
+  if (!ACCESS_PASSWORD) return true;
+  const now = Date.now(), f = authFails.get(ip);
+  if (f && f.n >= 10 && now - f.t < 900000) { send(res, 429, 'Too many failed attempts. Try again later.', 'text/plain; charset=utf-8', { 'Retry-After': '900' }); return false; }
+  const m = /^Basic (.+)$/i.exec(req.headers.authorization || '');
+  let u = '', p = '';
+  if (m) { const d = Buffer.from(m[1], 'base64').toString('utf8'), k = d.indexOf(':'); if (k >= 0) { u = d.slice(0, k); p = d.slice(k + 1); } }
+  const okU = crypto.timingSafeEqual(sha(u), wantU), okP = crypto.timingSafeEqual(sha(p), wantP);
+  if (okU && okP) { authFails.delete(ip); return true; }
+  if (m) { const r = f && now - f.t < 900000 ? f : { n: 0, t: now }; r.n++; authFails.set(ip, r); }
+  send(res, 401, 'Authentication required', 'text/plain; charset=utf-8', { 'WWW-Authenticate': 'Basic realm="Papertrail", charset="UTF-8"', 'Cache-Control': 'no-store' });
+  return false;
+}
+setInterval(() => { const c = Date.now() - 900000; for (const [k, v] of authFails) if (v.t < c) authFails.delete(k); }, 60000).unref();
+
 const buckets = new Map();
 function charge(ip, cost) {
   const now = Date.now(), b = buckets.get(ip) || { pts: RATE_POINTS, t: now };
@@ -344,6 +389,7 @@ const server = http.createServer(async (req, res) => {
   try {
     const u = new URL(req.url, 'http://x');
     const ip = (TRUST_PROXY && String(req.headers['x-forwarded-for'] || '').split(',')[0].trim()) || req.socket.remoteAddress;
+    if (u.pathname !== '/healthz' && !authorised(req, ip, res)) return;
     if (req.method === 'GET' && STATIC[u.pathname]) return send(res, 200, STATIC[u.pathname].body, STATIC[u.pathname].type, { 'Cache-Control': 'no-cache' });
     if (u.pathname === '/healthz') return send(res, 200, 'ok');
     if (!u.pathname.startsWith('/api/')) return send(res, 404, 'Not found');
@@ -386,4 +432,7 @@ const server = http.createServer(async (req, res) => {
   }
 });
 server.requestTimeout = 30000; server.headersTimeout = 10000; server.keepAliveTimeout = 5000;
-server.listen(PORT, '0.0.0.0', () => console.log('Newsdesk listening on :' + PORT));
+server.listen(PORT, '0.0.0.0', () => {
+  console.log('Papertrail listening on :' + PORT + (ACCESS_PASSWORD ? ' (password protected)' : ' (NO access password set)'));
+  if (ACCESS_PASSWORD && ACCESS_PASSWORD.length < 10) console.warn('Warning: ACCESS_PASSWORD is short; use 12+ random characters.');
+});

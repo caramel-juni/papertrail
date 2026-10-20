@@ -1,4 +1,4 @@
-# Newsdesk
+# Papertrail
 
 A self-hosted, fraidycat-style news aggregator. One Docker container, no accounts, no database.
 
@@ -31,8 +31,15 @@ Edit `data/sources.txt` for server-side defaults, or paste/upload your own list 
 - Remote content never touches your origin: summaries are reduced to plain text and rendered with textContent;
   thumbnails go through an image proxy (raster types only, no SVG, sandboxed) so readers' IPs aren't leaked to
   publishers. Strict CSP (`default-src 'none'`, scripts/styles/images from self only), nosniff, no-referrer.
+- Hardening switches (environment variables): `ACCESS_PASSWORD` (+ optional `ACCESS_USER`) puts the whole app behind a login with
+  lockout after 10 failures; `MAX_OUTBOUND` / `MAX_QUEUE` cap simultaneous outbound fetches. Saved links and imported backups are
+  validated in the browser (http/https only, safe keys, size caps).
 - Container: non-root, read-only filesystem, all capabilities dropped, no-new-privileges, memory/PID limits.
 - For extra defence in depth, run it on a network that can't reach your LAN, and serve it behind HTTPS.
+
+## Feeds served as downloads
+Feeds that browsers offer as a file download (`application/octet-stream`, `Content-Disposition: attachment`, gzip-encoded, odd charsets)
+are read like any other; only clearly binary types (images, PDFs, archives) are refused.
 
 ## Limits to know about
 - Sites that block bots, need JavaScript to render, or sit behind paywalls/logins may return nothing or only headlines.

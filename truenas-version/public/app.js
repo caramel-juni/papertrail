@@ -14,9 +14,45 @@ const load = (k, d) => { try { return JSON.parse(localStorage.getItem(k)) ?? d; 
 const store = (k, v) => { try { localStorage.setItem(k, JSON.stringify(v)); return true; } catch { return false; } };
 const post = (url, body) => fetch(url, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) });
 
-let sourcesText = load('sources', ''), cache = load('cache', {}), saved = load('saved', {}), later = load('later', {}), report = load('report', {}),
-  cats = load('cats', []), assign = load('assign', {}), kept = load('kept', {}), sstat = load('sstat', {}),
-  cfg = { win: 72, sort: 'new', title: 'News report', ...load('cfg', {}) };
+/* sanitisers: everything read from localStorage or an imported backup passes through these */
+const ID_RE = /^a[0-9a-f]{16}$/;
+const str = (v, n) => typeof v === 'string' ? v.slice(0, n) : '';
+const httpUrl = u => { try { const x = new URL(String(u)); return /^https?:$/.test(x.protocol) ? String(u).slice(0, 2000) : null; } catch { return null; } };
+const num = v => Number.isFinite(v) ? v : null;
+function cleanItem(id, o) {
+  if (!ID_RE.test(id) || !o || typeof o !== 'object') return null;
+  const link = httpUrl(o.link), title = str(o.title, 300);
+  if (!link || !title) return null;
+  return { id, title, link, published: num(o.published), seen: num(o.seen) || Date.now(), summary: str(o.summary, 800),
+    image: o.image ? httpUrl(o.image) : null, source: str(o.source, 80), sourceUrl: httpUrl(o.sourceUrl) || '',
+    tags: Array.isArray(o.tags) ? o.tags.filter(t => typeof t === 'string').slice(0, 12).map(t => t.slice(0, 40)) : [],
+    scraped: !!o.scraped, enriched: !!o.enriched, headTried: num(o.headTried) || undefined };
+}
+function cleanMap(m) {
+  const out = {}; let n = 0;
+  if (m && typeof m === 'object') for (const [id, o] of Object.entries(m)) { if (++n > 5000) break; const c = cleanItem(id, o); if (c) out[id] = c; }
+  return out;
+}
+const cleanCats = a => Array.isArray(a) ? [...new Set(a.filter(x => typeof x === 'string').map(x => x.trim().slice(0, 60)).filter(Boolean))].slice(0, 200) : [];
+function cleanAssign(m) {
+  const out = {}; let n = 0;
+  if (m && typeof m === 'object') for (const [id, a] of Object.entries(m)) { if (++n > 5000) break; if (ID_RE.test(id)) { const c = cleanCats(a).slice(0, 30); if (c.length) out[id] = c; } }
+  return out;
+}
+function cleanStat(m) {
+  const out = {};
+  if (m && typeof m === 'object') for (const [u, s] of Object.entries(m)) if (httpUrl(u) && s && typeof s === 'object')
+    out[u] = { ok: !!s.ok, name: str(s.name, 80), count: +s.count || 0, via: str(s.via, 30), ms: +s.ms || 0, error: str(s.error, 200), stage: str(s.stage, 30),
+      hint: str(s.hint, 300), http: +s.http || 0, trail: Array.isArray(s.trail) ? s.trail.slice(0, 30).map(t => str(t, 300)) : [], at: +s.at || 0 };
+  return out;
+}
+const cleanCfg = c => ({ ...c, win: [6, 24, 72, 168, 336, 720].includes(+c.win) ? +c.win : 72, sort: c.sort === 'trend' ? 'trend' : 'new',
+  title: str(c.title, 120) || 'News report', last: num(c.last) || 0 });
+/* end sanitisers */
+
+let sourcesText = str(load('sources', ''), 100000), cache = cleanMap(load('cache', {})), saved = cleanMap(load('saved', {})), later = cleanMap(load('later', {})), report = cleanMap(load('report', {})),
+  cats = cleanCats(load('cats', [])), assign = cleanAssign(load('assign', {})), kept = cleanMap(load('kept', {})), sstat = cleanStat(load('sstat', {})),
+  cfg = cleanCfg({ win: 72, sort: 'new', title: 'News report', ...load('cfg', {}) });
 let view = 'feed', tag = '', src = '', q = '', limit = 100, catSel = '', panelOpen = false, lastItems = [];
 const expanded = new Set(), catOpen = new Set(), failOpen = new Set();
 const STOP = new Set('about after again also been before being could does from have into just like more most over said says than that their them then there these they this were what when where which while will with would your'.split(' '));
@@ -51,7 +87,8 @@ function merge(s) {
   for (const it of s.items) {
     const old = cache[it.id] || {};
     const fresh = Object.fromEntries(Object.entries(it).filter(([, v]) => v != null && v !== ''));
-    cache[it.id] = { ...old, ...fresh, tags: [...new Set([...(old.tags || []), ...(it.tags || [])])], seen: old.seen || Date.now(), source: s.name, sourceUrl: s.url };
+    const c = cleanItem(it.id, { ...old, ...fresh, tags: [...new Set([...(old.tags || []), ...(it.tags || [])])], seen: old.seen || Date.now(), source: s.name, sourceUrl: s.url });
+    if (c) cache[it.id] = c;
   }
 }
 const failed = (s, error, stage, hint) => { sstat[s.url] = { ok: false, error, stage, hint, trail: [], at: Date.now() }; };
@@ -102,8 +139,8 @@ let enriching = 0, enrichTimer;
 const scheduleEnrich = () => { clearTimeout(enrichTimer); enrichTimer = setTimeout(enrich, 150); };
 function applyInfo(id, d) {
   for (const o of [cache[id], saved[id], later[id], report[id], kept[id]]) if (o) {
-    if (d.image && !o.image) o.image = d.image;
-    if (d.summary && !o.summary) o.summary = d.summary;
+    if (httpUrl(d.image) && !o.image) o.image = d.image;
+    if (d.summary && !o.summary) o.summary = str(d.summary, 800);
   }
 }
 async function enrich() {
@@ -188,7 +225,7 @@ function card(i) {
       act(later[i.id] ? '⏰ In read later' : '⏰ Read later', later[i.id], () => toggleIn(later, i)),
       act(mine.length ? `📁 Categories (${mine.length})` : '📁 Categories', catOpen.has(i.id), () => { catOpen.has(i.id) ? catOpen.delete(i.id) : catOpen.add(i.id); render(); }),
       act(report[i.id] ? '📄 In report' : '📄 Add to report', report[i.id], () => toggleIn(report, i)),
-      h('a', { class: 'act', href: i.link, target: '_blank', rel: 'noopener noreferrer' }, 'Open ↗')),
+      h('a', { class: 'act', href: httpUrl(i.link), target: '_blank', rel: 'noopener noreferrer' }, 'Open ↗')),
     catOpen.has(i.id) && catPanel(i));
 }
 function srcRow(s, st) {
@@ -286,7 +323,7 @@ function wire() {
   $('#refresh').onclick = () => refresh(); $('#srcBtn').onclick = openSources; $('#start').onclick = openSources;
   document.querySelectorAll('#tabs button').forEach(b => { b.onclick = () => { view = b.dataset.view; limit = 100; render(); }; });
   $('#srcFile').onchange = async e => { if (e.target.files[0]) $('#srcText').value = await readFile(e.target.files[0]); };
-  $('#srcSave').onclick = () => { sourcesText = $('#srcText').value; persist(); $('#dlg').close(); refresh(); };
+  $('#srcSave').onclick = () => { sourcesText = $('#srcText').value.slice(0, 100000); persist(); $('#dlg').close(); refresh(); };
   $('#srcClose').onclick = $('#srcX').onclick = () => $('#dlg').close();
   $('#srcDefaults').onclick = async () => { const t2 = await (await fetch('/api/default-sources')).text(); if (t2) $('#srcText').value = t2; else alert('No server-side default sources configured.'); };
   $('#exportBtn').onclick = () => {
@@ -296,10 +333,11 @@ function wire() {
   $('#importFile').onchange = async e => {
     try {
       const d = JSON.parse(await readFile(e.target.files[0]));
-      if (typeof d.sources === 'string') sourcesText = d.sources;
-      for (const [k, m] of [['saved', saved], ['later', later], ['report', report], ['assign', assign], ['kept', kept]]) if (d[k] && typeof d[k] === 'object') Object.assign(m, d[k]);
-      if (Array.isArray(d.cats)) cats = [...new Set([...cats, ...d.cats.map(String)])];
-      if (d.cfg && typeof d.cfg === 'object') cfg = { ...cfg, win: +d.cfg.win || cfg.win, sort: d.cfg.sort === 'trend' ? 'trend' : 'new', title: String(d.cfg.title || cfg.title) };
+      if (typeof d.sources === 'string') sourcesText = d.sources.slice(0, 100000);
+      for (const [k, m] of [['saved', saved], ['later', later], ['report', report], ['kept', kept]]) Object.assign(m, cleanMap(d[k]));
+      Object.assign(assign, cleanAssign(d.assign));
+      cats = cleanCats([...cats, ...cleanCats(d.cats), ...Object.values(assign).flat()]);
+      cfg = cleanCfg({ ...cfg, ...(d.cfg && typeof d.cfg === 'object' ? { win: d.cfg.win, sort: d.cfg.sort, title: d.cfg.title } : {}) });
       persist(); $('#dlg').close(); render(); refresh();
     } catch { alert('That file is not a valid backup.'); }
   };
