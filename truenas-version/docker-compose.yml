@@ -1,0 +1,35 @@
+services:
+  papertrail:
+    cap_drop:
+      - ALL
+    command:
+      - node
+      - server.js
+    container_name: papertrail
+    environment:
+      - NODE_ENV=production
+      - SOURCES_FILE=/app/data/sources.txt
+      - TRUST_PROXY=0
+      - RATE_POINTS_PER_MIN=600
+    healthcheck:
+      interval: 30s
+      test:
+        - CMD
+        - wget
+        - '-qO-'
+        - http://127.0.0.1:8089/healthz
+    image: node:22-alpine
+    mem_limit: 512m
+    pids_limit: 200
+    ports:
+      - '8089:8080'
+    read_only: True
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp
+    user: '568:568'
+    volumes:
+      - /mnt/xxxx/xxxxxx/papertrail-news:/app:ro
+    working_dir: /app

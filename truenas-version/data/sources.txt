@@ -1,0 +1,5 @@
+# One source per line. Optional tags after a pipe. Feeds are used when found; otherwise the page is scraped.
+https://feeds.bbci.co.uk/news/rss.xml | world
+https://www.theguardian.com/world/rss | world
+https://hnrss.org/frontpage | tech
+https://www.abc.net.au/news | australia
